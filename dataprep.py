@@ -8,6 +8,7 @@ import os
 import subprocess
 import pdb
 import hashlib
+import shlex
 import time
 import glob
 import tarfile
@@ -23,9 +24,12 @@ parser = argparse.ArgumentParser(description = "VoxCeleb downloader");
 parser.add_argument('--save_path',     type=str, default="data", help='Target directory');
 parser.add_argument('--user',         type=str, default="user", help='Username');
 parser.add_argument('--password',     type=str, default="pass", help='Password');
+parser.add_argument('--key_download',  type=str,   default="none", help='the secret that give you a way to download')
 
 parser.add_argument('--download', dest='download', action='store_true', help='Enable download')
 parser.add_argument('--extract',  dest='extract',  action='store_true', help='Enable extract')
+parser.add_argument('--extracted',  dest='extracted',  action='store_true', help='Enable extract')
+
 parser.add_argument('--convert',  dest='convert',  action='store_true', help='Enable convert')
 parser.add_argument('--augment',  dest='augment',  action='store_true', help='Download and extract augmentation files')
 
@@ -49,11 +53,24 @@ def download(args, lines):
 
     for line in lines:
         url     = line.split()[0]
+        url = url.replace("KEYDOWNLOAD",args.key_download)
         md5gt     = line.split()[1]
-        outfile = url.split('/')[-1]
+        if 'file=' in url:
+            outfile = url.split('file=')[-1]
+        else:
+            outfile = url.split('/')[-1]
+
 
         ## Download files
-        out     = subprocess.call('wget %s --user %s --password %s -O %s/%s'%(url,args.user,args.password,args.save_path,outfile), shell=True)
+        command = 'wget %s --no-check-certificate --user %s --password %s -O %s/%s' % (
+        shlex.quote(url),  # Escapes special chars (&, spaces, etc.)
+        shlex.quote(args.user),
+        shlex.quote(args.password),
+        shlex.quote(args.save_path),
+        shlex.quote(outfile)
+        )
+
+        out     = subprocess.call(command, shell=True)
         if out != 0:
             raise ValueError('Download failed %s. If download fails repeatedly, use alternate URL on the VoxCeleb website.'%url)
 
@@ -194,10 +211,18 @@ if __name__ == "__main__":
         download(args,fileparts)
 
     if args.extract:
-        concatenate(args, files)
-        for file in files:
-            full_extract(args,os.path.join(args.save_path,file.split()[1]))
-        out = subprocess.call('mv %s/dev/aac/* %s/aac/ && rm -r %s/dev' %(args.save_path,args.save_path,args.save_path), shell=True)
+        if not args.extracted:
+            concatenate(args, files)
+            for file in files:
+                full_extract(args,os.path.join(args.save_path,file.split()[1]))
+        aac_dir = os.path.join(args.save_path, 'aac')
+        os.makedirs(aac_dir, exist_ok=True)
+        wav_dir = os.path.join(args.save_path, 'wav')
+        os.makedirs(wav_dir, exist_ok=True)
+        try:
+            out = subprocess.call('mv %s/dev/aac/* %s/aac/ && rm -r %s/dev' %(args.save_path,args.save_path,args.save_path), shell=True)
+        except:
+            print("skip "+'mv %s/dev/aac/* %s/aac/ && rm -r %s/dev' %(args.save_path,args.save_path,args.save_path))
         out = subprocess.call('mv %s/wav %s/voxceleb1' %(args.save_path,args.save_path), shell=True)
         out = subprocess.call('mv %s/aac %s/voxceleb2' %(args.save_path,args.save_path), shell=True)
 

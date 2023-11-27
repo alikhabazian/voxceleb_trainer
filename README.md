@@ -11,8 +11,10 @@ pip install -r requirements.txt
 
 The following script can be used to download and prepare the VoxCeleb dataset for training.
 
+get key from https://cn01.mmai.io/keyreq/voxceleb
+
 ```
-python ./dataprep.py --save_path data --download --user USERNAME --password PASSWORD 
+python ./dataprep.py --save_path data --download --user USERNAME --password PASSWORD --key_download b3c6ab442eebcd23296f8c1d62a5ddc35637bb3b23bc8cd49079e203fd502c7879aa37d9263c079ca3c77cfd3a99209c17ffd41f9c28077f1071941a77b76fe44cef8e2c23370e113935799758e650e5ee242e28aa6d92c8d247a5b8d1ae2177008f3f9850d716f2976f22b69d2347e57c4fcb9cb4e76fa0d1fcfba34867aff8
 python ./dataprep.py --save_path data --extract
 python ./dataprep.py --save_path data --convert
 ```

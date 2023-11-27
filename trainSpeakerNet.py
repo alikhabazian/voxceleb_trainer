@@ -16,6 +16,11 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 warnings.simplefilter("ignore")
 
+from torch.utils.tensorboard import SummaryWriter
+
+# Create a writer to log data for TensorBoard
+writer = SummaryWriter(log_dir='runs/experiment1')
+
 ## ===== ===== ===== ===== ===== ===== ===== =====
 ## Parse arguments
 ## ===== ===== ===== ===== ===== ===== ===== =====
@@ -214,7 +219,7 @@ def main_worker(gpu, ngpus_per_node, args):
         clr = [x['lr'] for x in trainer.__optimizer__.param_groups]
 
         loss, traineer = trainer.train_network(train_loader, verbose=(args.gpu == 0))
-
+        writer.add_scalar('Loss/train', loss, it)
         if args.gpu == 0:
             print('\n',time.strftime("%Y-%m-%d %H:%M:%S"), "Epoch {:d}, TEER/TAcc {:2.2f}, TLOSS {:f}, LR {:f}".format(it, traineer, loss, max(clr)))
             scorefile.write("Epoch {:d}, TEER/TAcc {:2.2f}, TLOSS {:f}, LR {:f} \n".format(it, traineer, loss, max(clr)))
