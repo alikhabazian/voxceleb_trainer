@@ -19,37 +19,97 @@ class WrappedModel(nn.Module):
         super(WrappedModel, self).__init__()
         self.module = model
 
-    def forward(self, x, label=None):
-        return self.module(x, label)
+    def forward(self, x, speaker_label=None,accent_label=None,old_model_label=None,type_output=None):
+        return self.module(x, speaker_label,accent_label,old_model_label,type_output)
 
 
 class SpeakerNet(nn.Module):
-    def __init__(self, model, optimizer, trainfunc, nPerSpeaker, **kwargs):
+    def __init__(self, model, optimizer, trainfunc, nPerSpeaker, s_state=None,logger=None, **kwargs):
         super(SpeakerNet, self).__init__()
 
+        self.logger=logger
         SpeakerNetModel = importlib.import_module("models." + model).__getattribute__("MainModel")
-        self.__S__ = SpeakerNetModel(**kwargs)
+        #TODO make change output size of model 
+        self.__S1__ = SpeakerNetModel(**kwargs)
+        missing, unexpected = self.__S1__.load_state_dict(s_state, strict=False)
+        print("Missing keys:", missing)
+        print("Unexpected keys:", unexpected)
+
+        self.speaker_head = nn.Sequential(
+            nn.Linear(512, 512),
+            nn.GELU(),
+            nn.LayerNorm(512),
+            nn.Linear(512, 256)  # residual added in forward
+        )
+        
+        self.accent_head = nn.Sequential(
+            nn.Linear(512, 512),
+            nn.GELU(),
+            nn.LayerNorm(512),
+            nn.Linear(512, 256)  # residual added in forward
+        )
+        
+        self.fusion = nn.Sequential(
+            nn.Linear(512, 512),
+            nn.GELU(),
+            nn.LayerNorm(512),
+            nn.Linear(512, 512)  # residual added in forward
+        )
 
         LossFunction = importlib.import_module("loss." + trainfunc).__getattribute__("LossFunction")
-        self.__L__ = LossFunction(**kwargs)
-
+        LossFunctionDistillation = importlib.import_module("loss." + trainfunc).__getattribute__("LossFunction")
+        #TODO make change input size of loss 
+        self.__L1__ = LossFunction(**kwargs)
+        self.__L2__ = LossFunction(**kwargs)
+        #TODO Distillation to teacher (for fusion): cosine similarity + L2 to t
+        self.__L3__ = LossFunctionDistillation(**kwargs)
         self.nPerSpeaker = nPerSpeaker
+        self.it=0
 
-    def forward(self, data, label=None):
+    def forward(self, data, speaker_label=None,accent_label=None,old_model_label=None,type_output=None):
 
         data = data.reshape(-1, data.size()[-1]).cuda()
-        outp = self.__S__.forward(data)
+        with torch.no_grad():
+            outp = self.__S1__.forward(data)
+        
 
-        if label == None:
-            return outp
+        # assert speaker_label is not None and accent_label is not None, "must have label for both speaker and accent"
+        # print("speaker_label:",speaker_label,"accent_label:",accent_label)
+        # assert old_model_label is not None , "Must have true H/ASP model"
+        
+        
+        output1 = outp          
+        output2 = outp           
+         
+        speaker_head_out = self.speaker_head(output1) 
+        accent_head_out  = self.accent_head(output2) 
 
-        else:
+        if type_output=='speaker':
+            return speaker_head_out
+        if type_output=='accent':
+            return speaker_head_out
 
-            outp = outp.reshape(self.nPerSpeaker, -1, outp.size()[-1]).transpose(1, 0).squeeze(1)
+        speaker_head_out = speaker_head_out.reshape(self.nPerSpeaker, -1, speaker_head_out.size()[-1]).transpose(1, 0).squeeze(1)
 
-            nloss, prec1 = self.__L__.forward(outp, label)
+        nloss_speaker, prec_speaker = self.__L1__.forward(speaker_head_out, speaker_label)
 
-            return nloss, prec1
+        accent_head_out = accent_head_out.reshape(self.nPerSpeaker, -1, accent_head_out.size()[-1]).transpose(1, 0).squeeze(1)
+        
+        nloss_accent, prec_accent = self.__L2__.forward(accent_head_out, accent_label)
+        
+        
+        fused_input = torch.cat([speaker_head_out, accent_head_out], dim=-1)
+        
+        fusion_out = self.fusion(fused_input)
+        
+        nloss_fusion, prec_fusion = self.__L3__.forward(fusion_out,old_model_label)
+        
+        self.logger.add_scalar('nloss_speaker', nloss_speaker, self.it)
+        self.logger.add_scalar('nloss_accent', nloss_accent, self.it)
+        self.logger.add_scalar('nloss_fusion', nloss_fusion, self.it)
+        self.it=self.it+1
+        
+        return nloss_speaker+nloss_accent+nloss_fusion, (prec_speaker+prec_accent+prec_fusion)/3
 
 
 class ModelTrainer(object):
@@ -75,7 +135,7 @@ class ModelTrainer(object):
     # ## Train network
     # ## ===== ===== ===== ===== ===== ===== ===== =====
 
-    def train_network(self, loader, verbose):
+    def train_network(self, loader,oldModel, verbose):
 
         self.__model__.train()
 
@@ -89,13 +149,15 @@ class ModelTrainer(object):
 
         tstart = time.time()
 
-        for data, data_label in loader:
-
+        for data, data_speaker_label,data_accent_label in loader:
+            old_model_label=oldModel(data)
+            # print("output_old_model:",output_old_model)
             data = data.transpose(1, 0)
 
             self.__model__.zero_grad()
 
-            label = torch.LongTensor(data_label).cuda()
+            speaker_label = torch.LongTensor(data_speaker_label).cuda()
+            accent_label = torch.LongTensor(data_accent_label).cuda()
 
             if self.mixedprec:
                 with autocast():
@@ -104,7 +166,7 @@ class ModelTrainer(object):
                 self.scaler.step(self.__optimizer__)
                 self.scaler.update()
             else:
-                nloss, prec1 = self.__model__(data, label)
+                nloss, prec1 = self.__model__(data, speaker_label,accent_label,old_model_label)
                 nloss.backward()
                 self.__optimizer__.step()
 
@@ -133,7 +195,7 @@ class ModelTrainer(object):
     ## Evaluate from list
     ## ===== ===== ===== ===== ===== ===== ===== =====
 
-    def evaluateFromList(self, test_list, test_path, nDataLoaderThread, distributed, print_interval=100, num_eval=10, **kwargs):
+    def evaluateFromList(self, test_list, test_path, nDataLoaderThread, distributed, print_interval=100, num_eval=10,type_output=None, **kwargs):
 
         if distributed:
             rank = torch.distributed.get_rank()
@@ -148,6 +210,7 @@ class ModelTrainer(object):
         tstart = time.time()
 
         ## Read all lines
+        
         with open(test_list) as f:
             lines = f.readlines()
 
@@ -172,7 +235,7 @@ class ModelTrainer(object):
         for idx, data in enumerate(test_loader):
             inp1 = data[0][0].cuda()
             with torch.no_grad():
-                ref_feat = self.__model__(inp1).detach().cpu()
+                ref_feat = self.__model__(inp1,type_output=type_output).detach().cpu()
             feats[data[1][0]] = ref_feat
             telapsed = time.time() - tstart
 
@@ -213,7 +276,12 @@ class ModelTrainer(object):
                 ref_feat = feats[data[1]].cuda()
                 com_feat = feats[data[2]].cuda()
 
-                if self.__model__.module.__L__.test_normalize:
+                Loss = None
+                if type_output=='speaker':
+                    Loss=self.__model__.module.__L1__
+                if type_output=='accent':
+                    Loss=self.__model__.module.__L2__
+                if Loss.test_normalize:
                     ref_feat = F.normalize(ref_feat, p=2, dim=1)
                     com_feat = F.normalize(com_feat, p=2, dim=1)
 
@@ -245,10 +313,8 @@ class ModelTrainer(object):
     ## ===== ===== ===== ===== ===== ===== ===== =====
 
     def loadParameters(self, path):
-        try:
-            self_state = self.__model__.module.state_dict()
-        except:
-            self_state = self.__model__.state_dict()
+
+        self_state = self.__model__.module.state_dict()
         loaded_state = torch.load(path, map_location="cuda:%d" % self.gpu)
         if len(loaded_state.keys()) == 1 and "model" in loaded_state:
             loaded_state = loaded_state["model"]

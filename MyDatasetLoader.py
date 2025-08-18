@@ -20,6 +20,7 @@ def round_down(num, divisor):
     return num - (num%divisor)
 
 def worker_init_fn(worker_id):
+    print("worker_id:",worker_id)
     numpy.random.seed(numpy.random.get_state()[1][0] + worker_id)
 
 
@@ -124,28 +125,42 @@ class train_dataset_loader(Dataset):
         dictkeys = list(set([x.split()[0] for x in lines]))
         dictkeys.sort()
         dictkeys = { key : ii for ii, key in enumerate(dictkeys) }
-
+        # dictkeys is a dictionary of convert speaker_name id_0001 to index 0
+        dictkeys_accent = list(set([x.split()[1] for x in lines]))
+        dictkeys_accent.sort()
+        dictkeys_accent = { key : ii for ii, key in enumerate(dictkeys_accent) }
         # Parse the training list into file names and ID indices
         self.data_list  = []
-        self.data_label = []
+        self.data_speaker_label = []
+        self.data_accent_label = []
+
         
         for lidx, line in enumerate(lines):
             data = line.strip().split();
 
-            speaker_label = dictkeys[data[0]];
-            filename = os.path.join(train_path,data[1]);
+            speaker_label = dictkeys[data[0]]
+            accent_label = dictkeys_accent[data[1]]
+            filename = os.path.join(train_path,data[2].replace('.mp3','.wav'));
             
-            self.data_label.append(speaker_label)
+            self.data_speaker_label.append(speaker_label)
+            self.data_accent_label.append(accent_label)
             self.data_list.append(filename)
+        # self.data_speaker_label=self.data_speaker_label[:200]
+        # self.data_accent_label=self.data_accent_label[:200]
+        # self.data_list=self.data_list[:200]
+           
+
+            
 
     def __getitem__(self, indices):
-
+        
         feat = []
-
+        # print("indices:",indices)
         for index in indices:
-            
+            # print(index)
+            # print(self.data_list[index])
             audio = loadWAV(self.data_list[index], self.max_frames, evalmode=False)
-            
+            # print("audio type:",type(audio))
             if self.augment:
                 augtype = random.randint(0,4)
                 if augtype == 1:
@@ -160,8 +175,7 @@ class train_dataset_loader(Dataset):
             feat.append(audio);
 
         feat = numpy.concatenate(feat, axis=0)
-
-        return torch.FloatTensor(feat), self.data_label[index]
+        return torch.FloatTensor(feat), self.data_speaker_label[index],self.data_accent_label[index]
 
     def __len__(self):
         return len(self.data_list)
@@ -186,63 +200,86 @@ class test_dataset_loader(Dataset):
 class train_dataset_sampler(torch.utils.data.Sampler):
     def __init__(self, data_source, nPerSpeaker, max_seg_per_spk, batch_size, distributed, seed, **kwargs):
 
-        self.data_label         = data_source.data_label;
-        self.nPerSpeaker        = nPerSpeaker;
-        self.max_seg_per_spk    = max_seg_per_spk;
-        self.batch_size         = batch_size;
-        self.epoch              = 0;
-        self.seed               = seed;
-        self.distributed        = distributed;
+        self.data_speaker_label         = data_source.data_speaker_label;
+        self.data_accent_label          = data_source.data_accent_label;
+        self.nPerSpeaker                = nPerSpeaker;
+        self.max_seg_per_spk            = max_seg_per_spk;
+        self.batch_size                 = batch_size;
+        self.epoch                      = 0;
+        self.seed                       = seed;
+        self.distributed                = distributed;
         
     def __iter__(self):
 
         g = torch.Generator()
         g.manual_seed(self.seed + self.epoch)
-        indices = torch.randperm(len(self.data_label), generator=g).tolist()
+        indices = torch.randperm(len(self.data_speaker_label), generator=g).tolist()
 
         data_dict = {}
+        accent_dict = {}
+        accent_list = []
 
         # Sort into dictionary of file indices for each ID
         for index in indices:
-            speaker_label = self.data_label[index]
+            speaker_label = self.data_speaker_label[index]
             if not (speaker_label in data_dict):
+                accent_label =self.data_accent_label[index]
+                if accent_label  not  in accent_list:
+                    accent_list.append(accent_label)
+                accent_index = accent_list.index(accent_label)
+                
+                    
                 data_dict[speaker_label] = [];
+                accent_dict[speaker_label] = accent_index
             data_dict[speaker_label].append(index);
+        
+        # print("data_dict:",data_dict)
+        # print("accent_dict:",accent_dict)
+        # print("data_dict:",data_dict)
+          
+        ## Number of whole accents
 
 
         ## Group file indices for each class
         dictkeys = list(data_dict.keys());
         dictkeys.sort()
+        # dictkeys is list of speaker_index
 
         lol = lambda lst, sz: [lst[i:i+sz] for i in range(0, len(lst), sz)]
 
         flattened_list = []
-        flattened_label = []
+        flattened_speaker_label = []
+        flattened_accent_label = []
         
         for findex, key in enumerate(dictkeys):
-            data    = data_dict[key]
+            data    = data_dict[key] # data list of this speaker index utterance
             numSeg  = round_down(min(len(data),self.max_seg_per_spk),self.nPerSpeaker)
             
             rp      = lol(numpy.arange(numSeg),self.nPerSpeaker)
-            flattened_label.extend([findex] * (len(rp)))
+            flattened_speaker_label.extend([findex] * (len(rp)))
+            flattened_accent_label.extend([accent_dict[key]] * (len(rp)))
             for indices in rp:
                 flattened_list.append([data[i] for i in indices])
 
         ## Mix data in random order
-        mixid           = torch.randperm(len(flattened_label), generator=g).tolist()
-        mixlabel        = []
-        mixmap          = []
+        mixid                    = torch.randperm(len(flattened_speaker_label), generator=g).tolist()
+        mixspeakerlabel          = []
+        mixaccentlabel           = []
+        mixmap                   = []
 
         ## Prevent two pairs of the same speaker in the same batch
         for ii in mixid:
-            startbatch = round_down(len(mixlabel), self.batch_size)
-            if flattened_label[ii] not in mixlabel[startbatch:]:
-                mixlabel.append(flattened_label[ii])
+            startbatch = round_down(len(mixspeakerlabel), self.batch_size)
+            if flattened_speaker_label[ii] not in mixspeakerlabel[startbatch:]:
+                mixspeakerlabel.append(flattened_speaker_label[ii])
+                mixaccentlabel.append(flattened_accent_label[ii])
                 mixmap.append(ii)
 
         mixed_list = [flattened_list[i] for i in mixmap]
 
         ## Divide data to each GPU
+        # print("end of train_sampler")
+        # print("mixed_list",mixed_list)
         if self.distributed:
             total_size  = round_down(len(mixed_list), self.batch_size * dist.get_world_size()) 
             start_index = int ( ( dist.get_rank()     ) / dist.get_world_size() * total_size )
